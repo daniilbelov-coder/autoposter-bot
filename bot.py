@@ -285,8 +285,8 @@ class AutoPosterBot:
         
         logger.info("Обработчики команд настроены")
     
-    def start(self):
-        """Запустить бота с планировщиком."""
+    async def start_async(self):
+        """Запустить бота асинхронно."""
         logger.info("Запуск бота...")
         
         # Настроить обработчики команд
@@ -302,31 +302,40 @@ class AutoPosterBot:
         logger.info("Бот запущен и ожидает выполнения задач по расписанию")
         logger.info("Нажмите Ctrl+C для остановки")
         
-        # Запустить обработчики команд
-        self.application.run_polling()
+        # Инициализировать и запустить polling
+        await self.application.initialize()
+        await self.application.start()
+        await self.application.updater.start_polling()
+        
+        # Держать бота запущенным
+        try:
+            # Бесконечный цикл для поддержания работы
+            while True:
+                await asyncio.sleep(1)
+        except (KeyboardInterrupt, SystemExit):
+            logger.info("Получен сигнал остановки")
+        finally:
+            # Остановить бота
+            await self.stop_async()
     
-    def stop(self):
-        """Остановить бота."""
+    async def stop_async(self):
+        """Остановить бота асинхронно."""
         logger.info("Остановка бота...")
         bot_scheduler.shutdown()
+        
         if self.application:
-            self.application.stop()
+            await self.application.updater.stop()
+            await self.application.stop()
+            await self.application.shutdown()
+        
         logger.info("Бот остановлен")
-
-
-async def main():
-    """Главная функция для запуска бота."""
-    # Создать экземпляр бота
-    bot = AutoPosterBot()
-    
-    # Запустить бота
-    bot.start()
 
 
 if __name__ == '__main__':
     # Запуск бота
     try:
-        asyncio.run(main())
+        bot = AutoPosterBot()
+        asyncio.run(bot.start_async())
     except KeyboardInterrupt:
         logger.info("Программа завершена пользователем")
     except Exception as e:
