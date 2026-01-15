@@ -23,9 +23,11 @@ class Database:
         self.init_database()
     
     def init_database(self):
-        """Создание таблицы message_history, если её нет."""
+        """Создание таблиц, если их нет."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
+            
+            # Таблица истории отправок в каналы
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS message_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -39,6 +41,20 @@ class Database:
                 )
             ''')
             
+            # Таблица подписчиков на еженедельное расписание
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS subscribers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER UNIQUE NOT NULL,
+                    username TEXT,
+                    first_name TEXT,
+                    last_name TEXT,
+                    subscribed_at TIMESTAMP NOT NULL,
+                    is_active BOOLEAN DEFAULT 1,
+                    last_sent_schedule TIMESTAMP
+                )
+            ''')
+            
             # Создание индексов для ускорения запросов
             cursor.execute('''
                 CREATE INDEX IF NOT EXISTS idx_message_id 
@@ -47,6 +63,10 @@ class Database:
             cursor.execute('''
                 CREATE INDEX IF NOT EXISTS idx_sent_date 
                 ON message_history(sent_date)
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_user_id 
+                ON subscribers(user_id)
             ''')
             
             conn.commit()
@@ -183,6 +203,154 @@ class Database:
         """Закрытие соединения с базой данных (для совместимости)."""
         # SQLite не требует явного закрытия при использовании context manager
         pass
+    
+    # --- Методы для работы с подписчиками ---
+    
+    def add_subscriber(self, user_id: int, username: str = None, 
+                      first_name: str = None, last_name: str = None) -> bool:
+        """
+        Добавить подписчика.
+        
+        Args:
+            user_id: Telegram ID пользователя
+            username: Username пользователя
+            first_name: Имя
+            last_name: Фамилия
+            
+        Returns:
+            True, если добавлен успешно
+        """
+        now = datetime.now(TIMEZONE)
+        
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute('''
+                    INSERT INTO subscribers 
+                    (user_id, username, first_name, last_name, subscribed_at, is_active)
+                    VALUES (?, ?, ?, ?, ?, 1)
+                ''', (user_id, username, first_name, last_name, 
+                      now.strftime('%Y-%m-%d %H:%M:%S')))
+                conn.commit()
+                logger.info(f"Подписчик добавлен: {user_id} (@{username})")
+                return True
+            except sqlite3.IntegrityError:
+                # Пользователь уже подписан, активируем подписку
+                cursor.execute('''
+                    UPDATE subscribers 
+                    SET is_active = 1, username = ?, first_name = ?, last_name = ?
+                    WHERE user_id = ?
+                ''', (username, first_name, last_name, user_id))
+                conn.commit()
+                logger.info(f"Подписка активирована для: {user_id}")
+                return True
+    
+    def remove_subscriber(self, user_id: int) -> bool:
+        """
+        Отписать пользователя.
+        
+        Args:
+            user_id: Telegram ID пользователя
+            
+        Returns:
+            True, если отписан успешно
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE subscribers 
+                SET is_active = 0
+                WHERE user_id = ?
+            ''', (user_id,))
+            conn.commit()
+            
+            if cursor.rowcount > 0:
+                logger.info(f"Подписчик отписан: {user_id}")
+                return True
+            return False
+    
+    def is_subscribed(self, user_id: int) -> bool:
+        """
+        Проверить, подписан ли пользователь.
+        
+        Args:
+            user_id: Telegram ID пользователя
+            
+        Returns:
+            True, если подписан
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT is_active 
+                FROM subscribers 
+                WHERE user_id = ?
+            ''', (user_id,))
+            
+            result = cursor.fetchone()
+            return result and result[0] == 1
+    
+    def get_active_subscribers(self) -> List[dict]:
+        """
+        Получить список активных подписчиков.
+        
+        Returns:
+            Список словарей с данными подписчиков
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT user_id, username, first_name, last_name, subscribed_at
+                FROM subscribers 
+                WHERE is_active = 1
+                ORDER BY subscribed_at DESC
+            ''')
+            
+            subscribers = []
+            for row in cursor.fetchall():
+                subscribers.append({
+                    'user_id': row[0],
+                    'username': row[1],
+                    'first_name': row[2],
+                    'last_name': row[3],
+                    'subscribed_at': row[4]
+                })
+            
+            return subscribers
+    
+    def update_last_sent_schedule(self, user_id: int):
+        """
+        Обновить время последней отправки расписания.
+        
+        Args:
+            user_id: Telegram ID пользователя
+        """
+        now = datetime.now(TIMEZONE)
+        
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE subscribers 
+                SET last_sent_schedule = ?
+                WHERE user_id = ?
+            ''', (now.strftime('%Y-%m-%d %H:%M:%S'), user_id))
+            conn.commit()
+    
+    def get_subscribers_count(self) -> int:
+        """
+        Получить количество активных подписчиков.
+        
+        Returns:
+            Количество подписчиков
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT COUNT(*) 
+                FROM subscribers 
+                WHERE is_active = 1
+            ''')
+            return cursor.fetchone()[0]
 
 
 # Создание глобального экземпляра базы данных

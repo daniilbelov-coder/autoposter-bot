@@ -45,6 +45,32 @@ class BotScheduler:
             
             logger.info(f"Добавлена задача отправки на {hour:02d}:{minute:02d} МСК")
     
+    def add_weekly_schedule_job(self, schedule_function):
+        """
+        Добавить задачу еженедельной рассылки расписания.
+        
+        Args:
+            schedule_function: Асинхронная функция для рассылки расписания
+        """
+        # Триггер на понедельник 10:00
+        trigger = CronTrigger(
+            day_of_week='mon',  # Понедельник
+            hour=10,
+            minute=0,
+            timezone=TIMEZONE
+        )
+        
+        # Добавить задачу
+        self.scheduler.add_job(
+            schedule_function,
+            trigger=trigger,
+            id='weekly_schedule',
+            name='Еженедельное расписание (понедельник 10:00)',
+            replace_existing=True
+        )
+        
+        logger.info("Добавлена задача еженедельной рассылки расписания: понедельник 10:00 МСК")
+    
     def start(self):
         """Запустить планировщик."""
         if not self.scheduler.running:
