@@ -13,7 +13,7 @@ from config import BOT_TOKEN, CHANNEL_IDS, logger, MAX_PHOTOS_PER_POST
 from database import db
 from message_selector import selector
 from scheduler import bot_scheduler
-from handlers import start_command, help_command, status_command, button_callback, error_handler
+from handlers import start_command, help_command, status_command, schedule_command, button_callback, error_handler
 from schedule_generator import generate_schedule_for_subscribers
 
 
@@ -348,6 +348,7 @@ class AutoPosterBot:
         self.application.add_handler(CommandHandler("start", start_command))
         self.application.add_handler(CommandHandler("help", help_command))
         self.application.add_handler(CommandHandler("status", status_command))
+        self.application.add_handler(CommandHandler("schedule", schedule_command))
         
         # Добавить обработчик кнопок
         self.application.add_handler(CallbackQueryHandler(button_callback))
