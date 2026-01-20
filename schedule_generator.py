@@ -1,13 +1,14 @@
 """
 Модуль для генерации еженедельного календаря коммуникаций в Excel.
+Использует умную логику распределения постов с учетом частоты и конфликтов.
 """
 
 import os
+import random
 from datetime import datetime, timedelta
-from typing import List, Dict
+from typing import List, Dict, Set
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
-from openpyxl.utils import get_column_letter
 from config import POSTING_TIMES, TIMEZONE, logger
 from message_selector import selector
 from database import db
@@ -35,33 +36,332 @@ def get_week_dates(start_date: datetime = None) -> List[datetime]:
     return week_dates
 
 
-def get_planned_posts_for_week() -> List[Dict]:
+def can_add_post_to_day(
+    schedule: Dict,
+    date: datetime,
+    message_id: int,
+    message_title: str,
+    conflict_ids: List[int]
+) -> bool:
+    """
+    Проверить, можно ли добавить пост в указанный день.
+    
+    Args:
+        schedule: Расписание (ключ - дата, значение - список постов)
+        date: Дата для проверки
+        message_id: ID сообщения
+        message_title: Название сообщения
+        conflict_ids: Список ID сообщений, с которыми нельзя публиковаться в один день
+        
+    Returns:
+        True, если пост можно добавить
+    """
+    date_key = date.date()
+    
+    # Проверяем посты в этот день
+    if date_key in schedule:
+        existing_posts = schedule[date_key]
+        
+        # Проверка 1: Этот пост уже запланирован на этот день
+        if any(p['message_id'] == message_id for p in existing_posts):
+            return False
+        
+        # Проверка 2: Конфликтующие посты в этот день
+        existing_ids = [p['message_id'] for p in existing_posts]
+        if any(conflict_id in existing_ids for conflict_id in conflict_ids):
+            return False
+    
+    # Проверяем соседние дни (2 дня до и 2 после)
+    for days_offset in range(-2, 3):
+        if days_offset == 0:
+            continue  # Текущий день уже проверили
+        
+        check_date = (date + timedelta(days=days_offset)).date()
+        
+        if check_date in schedule:
+            # Проверяем, есть ли этот же пост в соседних днях
+            if any(p['message_id'] == message_id for p in schedule[check_date]):
+                return False
+    
+    return True
+
+
+def get_day_post_count(schedule: Dict, date: datetime) -> int:
+    """Получить количество постов в указанный день."""
+    date_key = date.date()
+    return len(schedule.get(date_key, []))
+
+
+def calculate_message_priority(message: Dict, current_date: datetime) -> float:
+    """
+    Рассчитать приоритет сообщения для публикации.
+    Чем выше приоритет, тем важнее опубликовать сообщение.
+    
+    Args:
+        message: Словарь с данными сообщения
+        current_date: Текущая дата планирования
+        
+    Returns:
+        Приоритет (число от 0 до 100)
+    """
+    message_id = message['id']
+    frequency_days = message['frequency_days']
+    
+    # Получить дату последней отправки
+    last_sent_date = db.get_last_sent_date(message_id)
+    
+    if last_sent_date is None:
+        # Сообщение никогда не отправлялось - высокий приоритет
+        return 100.0
+    
+    # Рассчитать, сколько дней прошло
+    days_passed = (current_date.date() - last_sent_date).days
+    
+    # Рассчитать приоритет на основе прошедшего времени
+    if days_passed < frequency_days:
+        # Еще рано публиковать
+        return 0.0
+    elif days_passed == frequency_days:
+        # Идеальное время
+        return 50.0
+    else:
+        # Чем больше прошло времени, тем выше приоритет
+        overdue_days = days_passed - frequency_days
+        priority = 50.0 + min(overdue_days * 5, 50.0)  # До 100
+        return priority
+
+
+def get_planned_posts_for_week_smart() -> List[Dict]:
     """
     Получить список запланированных постов на неделю.
+    Использует умную логику распределения с учетом частоты и конфликтов.
     
     Returns:
         Список словарей с информацией о постах
     """
     week_dates = get_week_dates()
+    posts_per_day = len(POSTING_TIMES)
+    
+    # Создаем расписание: ключ - дата, значение - список постов
+    schedule: Dict[datetime.date, List[Dict]] = {}
+    
+    # Получаем все сообщения
+    all_messages = selector.messages
+    
+    if not all_messages:
+        logger.warning("Нет сообщений для планирования")
+        return []
+    
+    logger.info(f"Начало планирования на неделю: {len(all_messages)} сообщений доступно")
+    
+    # Инициализируем расписание пустыми списками
+    for date in week_dates:
+        schedule[date.date()] = []
+    
+    # Рассчитываем приоритеты сообщений
+    message_priorities = []
+    for message in all_messages:
+        priority = calculate_message_priority(message, week_dates[0])
+        if priority > 0:  # Только сообщения, которые уже можно публиковать
+            message_priorities.append({
+                'message': message,
+                'priority': priority
+            })
+    
+    # Сортируем по приоритету (от высокого к низкому)
+    message_priorities.sort(key=lambda x: x['priority'], reverse=True)
+    
+    logger.info(f"Сообщений с приоритетом > 0: {len(message_priorities)}")
+    
+    # Подсчитываем, сколько раз каждое сообщение должно быть опубликовано
+    # На основе frequency_days определяем частоту публикации в неделю
+    message_weekly_frequency = {}
+    current_week_number = week_dates[0].isocalendar()[1]  # Номер недели в году
+    
+    for msg_data in message_priorities:
+        message = msg_data['message']
+        message_id = message['id']
+        freq_days = message['frequency_days']
+        
+        # Рассчитываем частоту публикации в эту конкретную неделю
+        if freq_days <= 3:  # Ежедневно или несколько раз в неделю
+            weekly_freq = min(7 // freq_days, 3)  # Не больше 3 раз в неделю
+        elif freq_days == 7:  # Раз в неделю
+            weekly_freq = 1
+        elif freq_days == 14:  # Раз в 2 недели
+            # Проверяем, должно ли сообщение выйти на этой неделе
+            # Используем ID сообщения для определения четности
+            if (current_week_number + message_id) % 2 == 0:
+                weekly_freq = 1
+            else:
+                weekly_freq = 0
+        elif freq_days == 21:  # Раз в 3 недели
+            # Проверяем по остатку от деления
+            if (current_week_number + message_id) % 3 == 0:
+                weekly_freq = 1
+            else:
+                weekly_freq = 0
+        elif freq_days >= 28:  # Месяц и больше
+            # Проверяем по остатку от деления на 4 (недели в месяце)
+            if (current_week_number + message_id) % 4 == 0:
+                weekly_freq = 1
+            else:
+                weekly_freq = 0
+        else:
+            # Для промежуточных значений
+            if 7 / freq_days >= 0.5:
+                weekly_freq = 1
+            else:
+                weekly_freq = 0
+        
+        message_weekly_frequency[message_id] = {
+            'target': weekly_freq,
+            'placed': 0
+        }
+    
+    # Распределяем посты по дням
+    # Проход 1: Размещаем высокоприоритетные посты
+    for msg_data in message_priorities:
+        message = msg_data['message']
+        message_id = message['id']
+        target_freq = message_weekly_frequency[message_id]['target']
+        
+        if target_freq == 0:
+            continue  # Это сообщение не нужно публиковать на этой неделе
+        
+        # Пытаемся разместить сообщение target_freq раз
+        placed_count = 0
+        attempts = 0
+        max_attempts = 50
+        
+        while placed_count < target_freq and attempts < max_attempts:
+            attempts += 1
+            
+            # Ищем день с минимальной загрузкой, куда можно добавить пост
+            best_date = None
+            min_posts = float('inf')
+            
+            # Создаем список дней с их текущей загрузкой
+            day_loads = []
+            for date in week_dates:
+                post_count = get_day_post_count(schedule, date)
+                
+                # Проверяем, можно ли добавить пост в этот день
+                if post_count < posts_per_day:
+                    if can_add_post_to_day(
+                        schedule,
+                        date,
+                        message_id,
+                        message['title'],
+                        message.get('do_not_schedule_same_day_with', [])
+                    ):
+                        day_loads.append((date, post_count))
+            
+            if not day_loads:
+                # Не удалось найти подходящий день
+                logger.warning(f"Не удалось разместить сообщение {message_id} ({message['title']})")
+                break
+            
+            # Выбираем день с минимальной загрузкой
+            day_loads.sort(key=lambda x: x[1])
+            best_date = day_loads[0][0]
+            
+            # Если несколько дней с одинаковой загрузкой, выбираем случайно
+            min_load = day_loads[0][1]
+            days_with_min_load = [d for d, l in day_loads if l == min_load]
+            best_date = random.choice(days_with_min_load)
+            
+            # Добавляем пост в этот день
+            schedule[best_date.date()].append({
+                'message_id': message_id,
+                'message': message
+            })
+            
+            placed_count += 1
+            message_weekly_frequency[message_id]['placed'] += 1
+            
+            logger.debug(f"Размещено: {message['title']} на {best_date.date()}, "
+                        f"попытка {attempts}, размещено {placed_count}/{target_freq}")
+        
+        if placed_count < target_freq:
+            logger.warning(f"Сообщение {message_id} размещено {placed_count} раз вместо {target_freq}")
+    
+    # Создаем набор ID сообщений, уже размещенных на этой неделе
+    placed_message_ids = set()
+    for date_key in schedule:
+        for post_data in schedule[date_key]:
+            if post_data['message_id']:
+                placed_message_ids.add(post_data['message_id'])
+    
+    # Проход 2: Заполняем пустые слоты сообщениями, еще не размещенными на этой неделе
+    for date in week_dates:
+        current_posts = get_day_post_count(schedule, date)
+        
+        if current_posts < posts_per_day:
+            # Нужно добавить еще постов
+            slots_to_fill = posts_per_day - current_posts
+            
+            # Ищем сообщения, которые можно добавить
+            for _ in range(slots_to_fill):
+                # Перемешиваем сообщения для разнообразия
+                random_messages = list(all_messages)
+                random.shuffle(random_messages)
+                
+                added = False
+                for message in random_messages:
+                    # Проверка 1: Сообщение еще не размещено на этой неделе
+                    if message['id'] in placed_message_ids:
+                        continue
+                    
+                    # Проверка 2: Можно добавить в этот день (соседство, конфликты)
+                    if can_add_post_to_day(
+                        schedule,
+                        date,
+                        message['id'],
+                        message['title'],
+                        message.get('do_not_schedule_same_day_with', [])
+                    ):
+                        schedule[date.date()].append({
+                            'message_id': message['id'],
+                            'message': message
+                        })
+                        placed_message_ids.add(message['id'])  # Добавляем в набор размещенных
+                        added = True
+                        logger.debug(f"Дополнительно размещено: {message['title']} на {date.date()}")
+                        break
+                
+                if not added:
+                    logger.warning(f"Не удалось заполнить слот в день {date.date()}")
+                    # Добавляем пустой слот
+                    schedule[date.date()].append({
+                        'message_id': None,
+                        'message': None
+                    })
+    
+    # Преобразуем расписание в список постов с временными слотами
     planned_posts = []
     
-    # Для каждого дня недели
     for date in week_dates:
-        # Для каждого времени отправки
-        for time_config in POSTING_TIMES:
-            hour = time_config['hour']
-            minute = time_config['minute']
+        date_posts = schedule[date.date()]
+        
+        # Перемешиваем посты в дне для разнообразия времени
+        random.shuffle(date_posts)
+        
+        for idx, post_data in enumerate(date_posts):
+            if idx >= len(POSTING_TIMES):
+                break
             
-            post_datetime = date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            time_config = POSTING_TIMES[idx]
+            post_datetime = date.replace(
+                hour=time_config['hour'],
+                minute=time_config['minute'],
+                second=0,
+                microsecond=0
+            )
             
-            # Получить доступные сообщения (упрощенная версия - берем все)
-            available_messages = selector.messages
+            message = post_data.get('message')
             
-            if available_messages:
-                # Случайное сообщение для примера
-                import random
-                message = random.choice(available_messages)
-                
+            if message:
                 planned_posts.append({
                     'date': post_datetime.date(),
                     'time': post_datetime.time(),
@@ -69,13 +369,32 @@ def get_planned_posts_for_week() -> List[Dict]:
                     'day_name': post_datetime.strftime('%A'),
                     'message_id': message['id'],
                     'message_title': message['title'],
-                    'frequency': message['frequency'],
+                    'frequency': message.get('frequency', 'unknown'),
                     'has_photos': len(message.get('photos', [])) > 0,
-                    'photos_count': len(message.get('photos', []))
+                    'photos_count': len(message.get('photos', [])),
+                    'has_videos': len(message.get('videos', [])) > 0,
+                    'videos_count': len(message.get('videos', []))
+                })
+            else:
+                # Пустой слот
+                planned_posts.append({
+                    'date': post_datetime.date(),
+                    'time': post_datetime.time(),
+                    'datetime': post_datetime,
+                    'day_name': post_datetime.strftime('%A'),
+                    'message_id': None,
+                    'message_title': '—',
+                    'frequency': '',
+                    'has_photos': False,
+                    'photos_count': 0,
+                    'has_videos': False,
+                    'videos_count': 0
                 })
     
-    # Сортировать по дате и времени
+    # Сортируем по дате и времени
     planned_posts.sort(key=lambda x: x['datetime'])
+    
+    logger.info(f"Запланировано постов: {len([p for p in planned_posts if p['message_id']])}")
     
     return planned_posts
 
@@ -102,8 +421,8 @@ def create_schedule_excel(output_path: str = "schedule.xlsx") -> str:
     start_date = week_dates[0]
     end_date = week_dates[-1]
     
-    # Получить запланированные посты
-    planned_posts = get_planned_posts_for_week()
+    # Получить запланированные посты (умная логика)
+    planned_posts = get_planned_posts_for_week_smart()
     
     # Стили
     title_font = Font(name='Arial', size=14, bold=True, color='FFFFFF')
@@ -165,7 +484,10 @@ def create_schedule_excel(output_path: str = "schedule.xlsx") -> str:
         'Sunday': 'Воскресенье'
     }
     
-    for idx, post in enumerate(planned_posts, 1):
+    # Фильтруем только заполненные слоты
+    filled_posts = [p for p in planned_posts if p['message_id'] is not None]
+    
+    for idx, post in enumerate(filled_posts, 1):
         row = idx + 4
         
         # Чередующийся цвет строк
@@ -209,10 +531,11 @@ def create_schedule_excel(output_path: str = "schedule.xlsx") -> str:
         
         # Частота
         frequency_ru = {
-            'daily': 'Ежедневно',
-            'weekly': 'Еженедельно',
-            'biweekly': 'Раз в 2 недели',
-            'monthly': 'Ежемесячно'
+            'каждые 2 недели': 'каждые 2 недели',
+            'раз в месяц': 'раз в месяц',
+            'раз в неделю': 'раз в неделю',
+            'раз в две недели': 'раз в две недели',
+            'раз в 3 недели': 'раз в 3 недели',
         }
         freq_text = frequency_ru.get(post['frequency'], post['frequency'])
         cell = ws.cell(row=row, column=6, value=freq_text)
@@ -221,8 +544,14 @@ def create_schedule_excel(output_path: str = "schedule.xlsx") -> str:
         cell.border = border
         cell.fill = fill
         
-        # Фото
-        photos_text = f"✓ ({post['photos_count']})" if post['has_photos'] else "—"
+        # Фото/Видео
+        media_parts = []
+        if post['has_photos']:
+            media_parts.append(f"📷 ({post['photos_count']})")
+        if post['has_videos']:
+            media_parts.append(f"📹 ({post['videos_count']})")
+        
+        photos_text = " ".join(media_parts) if media_parts else "—"
         cell = ws.cell(row=row, column=7, value=photos_text)
         cell.font = cell_font
         cell.alignment = center_alignment
@@ -232,9 +561,9 @@ def create_schedule_excel(output_path: str = "schedule.xlsx") -> str:
         ws.row_dimensions[row].height = 18
     
     # Футер
-    footer_row = len(planned_posts) + 6
+    footer_row = len(filled_posts) + 6
     ws.merge_cells(f'A{footer_row}:G{footer_row}')
-    ws[f'A{footer_row}'] = f'Всего запланировано публикаций: {len(planned_posts)}'
+    ws[f'A{footer_row}'] = f'Всего запланировано публикаций: {len(filled_posts)}'
     ws[f'A{footer_row}'].font = Font(name='Arial', size=10, italic=True)
     ws[f'A{footer_row}'].alignment = center_alignment
     
@@ -252,7 +581,7 @@ def create_schedule_excel(output_path: str = "schedule.xlsx") -> str:
     ws.column_dimensions['D'].width = 8
     ws.column_dimensions['E'].width = 40
     ws.column_dimensions['F'].width = 18
-    ws.column_dimensions['G'].width = 10
+    ws.column_dimensions['G'].width = 12
     
     # Сохранить файл
     wb.save(output_path)
