@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional, Dict
 from config import MESSAGES_FILE, TIMEZONE, logger
 from database import db
+from text_formatter import format_message_text
 
 
 class MessageSelector:
@@ -33,8 +34,13 @@ class MessageSelector:
         try:
             with open(self.messages_file, 'r', encoding='utf-8') as f:
                 messages = json.load(f)
-            logger.info(f"Загружено {len(messages)} сообщений из {self.messages_file}")
-            return messages
+            
+            # Форматировать текст сообщений (конвертация Markdown в HTML уже выполнена)
+            # Но на всякий случай применяем форматирование
+            formatted_messages = [format_message_text(msg) for msg in messages]
+            
+            logger.info(f"Загружено {len(formatted_messages)} сообщений из {self.messages_file}")
+            return formatted_messages
         except FileNotFoundError:
             logger.error(f"Файл {self.messages_file} не найден!")
             return []

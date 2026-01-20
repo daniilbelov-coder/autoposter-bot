@@ -6,7 +6,7 @@
 import asyncio
 import os
 from typing import Optional, Dict, List
-from telegram import Bot, InputMediaPhoto, Update
+from telegram import Bot, InputMediaPhoto, InputMediaVideo, Update
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 from telegram.error import TelegramError
 from config import BOT_TOKEN, CHANNEL_IDS, logger, MAX_PHOTOS_PER_POST
@@ -44,9 +44,10 @@ class AutoPosterBot:
         try:
             text = message['text']
             photos = message.get('photos', [])
+            videos = message.get('videos', [])
             
-            # Если нет фотографий - отправляем только текст
-            if not photos:
+            # Если нет медиа файлов - отправляем только текст
+            if not photos and not videos:
                 await self.bot.send_message(
                     chat_id=channel_id,
                     text=text,
@@ -55,8 +56,63 @@ class AutoPosterBot:
                 logger.info(f"Текстовое сообщение отправлено в канал {channel_id}")
                 return True
             
-            # Если одна фотография - отправляем send_photo
-            if len(photos) == 1:
+            # Если есть только видео (без фото)
+            if videos and not photos:
+                # Если одно видео - отправляем send_video
+                if len(videos) == 1:
+                    video_path = videos[0]
+                    
+                    if not os.path.exists(video_path):
+                        logger.error(f"Видео не найдено: {video_path}")
+                        return False
+                    
+                    with open(video_path, 'rb') as video_file:
+                        await self.bot.send_video(
+                            chat_id=channel_id,
+                            video=video_file,
+                            caption=text,
+                            parse_mode='HTML'
+                        )
+                    
+                    logger.info(f"Сообщение с 1 видео отправлено в канал {channel_id}")
+                    return True
+                
+                # Если несколько видео - отправляем media group
+                media_group = []
+                for idx, video_path in enumerate(videos):
+                    if not os.path.exists(video_path):
+                        logger.error(f"Видео не найдено: {video_path}")
+                        continue
+                    
+                    with open(video_path, 'rb') as video_file:
+                        # Добавляем caption только к первому видео
+                        if idx == 0:
+                            media_group.append(
+                                InputMediaVideo(
+                                    media=video_file.read(),
+                                    caption=text,
+                                    parse_mode='HTML'
+                                )
+                            )
+                        else:
+                            media_group.append(
+                                InputMediaVideo(media=video_file.read())
+                            )
+                
+                if not media_group:
+                    logger.error("Не удалось загрузить ни одного видео")
+                    return False
+                
+                await self.bot.send_media_group(
+                    chat_id=channel_id,
+                    media=media_group
+                )
+                
+                logger.info(f"Сообщение с {len(media_group)} видео отправлено в канал {channel_id}")
+                return True
+            
+            # Если одна фотография и нет видео - отправляем send_photo
+            if len(photos) == 1 and not videos:
                 photo_path = photos[0]
                 
                 if not os.path.exists(photo_path):
@@ -74,35 +130,51 @@ class AutoPosterBot:
                 logger.info(f"Сообщение с 1 фото отправлено в канал {channel_id}")
                 return True
             
-            # Если несколько фотографий - отправляем media group
-            if len(photos) > MAX_PHOTOS_PER_POST:
-                logger.warning(f"Слишком много фото ({len(photos)}), "
+            # Если есть несколько медиа файлов (фото и/или видео) - отправляем media group
+            all_media = photos + videos
+            if len(all_media) > MAX_PHOTOS_PER_POST:
+                logger.warning(f"Слишком много медиа ({len(all_media)}), "
                              f"будут отправлены первые {MAX_PHOTOS_PER_POST}")
-                photos = photos[:MAX_PHOTOS_PER_POST]
+                all_media = all_media[:MAX_PHOTOS_PER_POST]
             
             media_group = []
-            for idx, photo_path in enumerate(photos):
-                if not os.path.exists(photo_path):
-                    logger.error(f"Фото не найдено: {photo_path}")
+            for idx, media_path in enumerate(all_media):
+                if not os.path.exists(media_path):
+                    logger.error(f"Медиа файл не найден: {media_path}")
                     continue
                 
-                with open(photo_path, 'rb') as photo_file:
-                    # Добавляем caption только к первому фото
+                # Определить тип медиа по расширению
+                is_video = media_path.lower().endswith(('.mp4', '.mov', '.avi', '.mkv'))
+                
+                with open(media_path, 'rb') as media_file:
+                    media_data = media_file.read()
+                    
+                    # Добавляем caption только к первому медиа
                     if idx == 0:
-                        media_group.append(
-                            InputMediaPhoto(
-                                media=photo_file.read(),
-                                caption=text,
-                                parse_mode='HTML'
+                        if is_video:
+                            media_group.append(
+                                InputMediaVideo(
+                                    media=media_data,
+                                    caption=text,
+                                    parse_mode='HTML'
+                                )
                             )
-                        )
+                        else:
+                            media_group.append(
+                                InputMediaPhoto(
+                                    media=media_data,
+                                    caption=text,
+                                    parse_mode='HTML'
+                                )
+                            )
                     else:
-                        media_group.append(
-                            InputMediaPhoto(media=photo_file.read())
-                        )
+                        if is_video:
+                            media_group.append(InputMediaVideo(media=media_data))
+                        else:
+                            media_group.append(InputMediaPhoto(media=media_data))
             
             if not media_group:
-                logger.error("Не удалось загрузить ни одного фото")
+                logger.error("Не удалось загрузить ни одного медиа файла")
                 return False
             
             await self.bot.send_media_group(
@@ -110,7 +182,7 @@ class AutoPosterBot:
                 media=media_group
             )
             
-            logger.info(f"Сообщение с {len(media_group)} фото отправлено в канал {channel_id}")
+            logger.info(f"Сообщение с {len(media_group)} медиа файлами отправлено в канал {channel_id}")
             return True
             
         except TelegramError as e:
