@@ -412,6 +412,10 @@ class AutoPosterBot:
         # Сохранить экземпляр бота в bot_data для доступа из handlers
         self.application.bot_data['bot_instance'] = self
         
+        # #region agent log
+        logger.info(f"[DEBUG-HypE] bot_instance saved to bot_data: bot_instance_type={type(self)}, bot_data_keys={list(self.application.bot_data.keys())}")
+        # #endregion
+        
         # Добавить обработчики команд
         self.application.add_handler(CommandHandler("start", start_command))
         self.application.add_handler(CommandHandler("help", help_command))
@@ -419,6 +423,10 @@ class AutoPosterBot:
         self.application.add_handler(CommandHandler("schedule", schedule_command))
         
         # Добавить админ conversation handler (должен быть перед CallbackQueryHandler)
+        # #region agent log
+        logger.info(f"[DEBUG-HypA] registering admin_conversation_handler: handler_type={type(admin_conversation_handler)}")
+        # #endregion
+        
         self.application.add_handler(admin_conversation_handler)
         
         # Добавить обработчик кнопок
