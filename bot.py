@@ -316,18 +316,23 @@ class AutoPosterBot:
         logger.info(f"Рассылка завершена: успешно {success_count}, ошибок {error_count}")
         logger.info("=" * 50)
     
-    async def send_specific_message(self, message: Dict) -> Dict:
+    async def send_specific_message(self, message: Dict, target_channels: Optional[List[int]] = None) -> Dict:
         """
-        Отправить конкретное сообщение во все каналы (для админа).
+        Отправить конкретное сообщение в указанные каналы (для админа).
         
         Args:
             message: Словарь с данными сообщения
+            target_channels: Список ID каналов (если None - отправка во все каналы)
             
         Returns:
             Словарь с результатами: {'success_count': int, 'error_count': int, 'channels': list}
         """
+        # Если target_channels не указан, отправляем во все каналы
+        if target_channels is None:
+            target_channels = CHANNEL_IDS
+        
         logger.info("=" * 50)
-        logger.info(f"[АДМИН] Отправка сообщения {message['id']} ({message['title']})")
+        logger.info(f"[АДМИН] Отправка сообщения {message['id']} ({message['title']}) в {len(target_channels)} каналов")
         
         message_id = message['id']
         message_title = message['title']
@@ -336,7 +341,7 @@ class AutoPosterBot:
         error_count = 0
         channels_result = []
         
-        for channel_id in CHANNEL_IDS:
+        for channel_id in target_channels:
             logger.info(f"[АДМИН] Отправка в канал {channel_id}...")
             
             success = await self.send_message_to_channel(channel_id, message)

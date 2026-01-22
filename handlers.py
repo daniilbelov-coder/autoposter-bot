@@ -13,6 +13,8 @@ from message_selector import selector
 # Состояния для админ-диалога
 ADMIN_PASSWORD_STATE = 1
 ADMIN_POST_SELECTION_STATE = 2
+ADMIN_CHANNEL_SELECTION_STATE = 3
+ADMIN_PREVIEW_STATE = 4
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -404,7 +406,7 @@ async def admin_check_password(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def admin_select_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Выбор поста по номеру и отправка в каналы."""
+    """Выбор поста по номеру - показать превью."""
     user = update.effective_user
     user_id = user.id
     text = update.message.text.strip()
@@ -431,34 +433,132 @@ async def admin_select_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ADMIN_POST_SELECTION_STATE
     
-    # Получить сообщение по индексу (индексы начинаются с 0)
+    # Получить сообщение по индексу
     messages = selector.messages
     message = messages[post_number - 1]
     
     logger.info(f"Админ {user_id} выбрал пост #{post_number}: {message['title']}")
     
-    # Отправить сообщение "Отправка..."
-    status_message = await update.message.reply_text(
+    # Сохранить выбранное сообщение в контексте
+    context.user_data['admin_selected_message'] = message
+    
+    # Показать превью поста
+    preview_text = f"📋 <b>Превью поста:</b>\n\n"
+    preview_text += f"<b>Название:</b> {message['title']}\n\n"
+    preview_text += f"<b>Текст:</b>\n{message['text'][:500]}"
+    
+    if len(message['text']) > 500:
+        preview_text += "...\n\n(текст сокращен)"
+    
+    # Медиа информация
+    photos = message.get('photos', [])
+    videos = message.get('videos', [])
+    
+    if photos:
+        preview_text += f"\n\n📸 <b>Фото:</b> {len(photos)} шт."
+    if videos:
+        preview_text += f"\n📹 <b>Видео:</b> {len(videos)} шт."
+    
+    # Кнопки для выбора куда отправить
+    from config import CHANNEL_IDS
+    keyboard = []
+    
+    # Кнопка "Во все каналы"
+    keyboard.append([InlineKeyboardButton(
+        f"📢 Отправить во все каналы ({len(CHANNEL_IDS)})",
+        callback_data="admin_send_all_channels"
+    )])
+    
+    # Кнопки для отдельных каналов
+    for idx, channel_id in enumerate(CHANNEL_IDS, 1):
+        keyboard.append([InlineKeyboardButton(
+            f"📡 Канал {idx} (ID: {channel_id})",
+            callback_data=f"admin_send_channel_{channel_id}"
+        )])
+    
+    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="admin_cancel_send")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        preview_text,
+        reply_markup=reply_markup,
+        parse_mode='HTML'
+    )
+    
+    return ADMIN_CHANNEL_SELECTION_STATE
+
+
+async def admin_send_to_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправка поста в выбранные каналы."""
+    query = update.callback_query
+    await query.answer()
+    
+    user = query.from_user
+    user_id = user.id
+    
+    # Получить выбранное сообщение
+    message = context.user_data.get('admin_selected_message')
+    
+    if not message:
+        await query.message.edit_text(
+            "❌ <b>Ошибка:</b> Сообщение не найдено.\n\n"
+            "Используйте /start для возврата в меню.",
+            parse_mode='HTML'
+        )
+        return ConversationHandler.END
+    
+    # Определить каналы для отправки
+    from config import CHANNEL_IDS
+    
+    if query.data == "admin_send_all_channels":
+        target_channels = CHANNEL_IDS
+        channel_desc = f"все каналы ({len(target_channels)})"
+    elif query.data.startswith("admin_send_channel_"):
+        channel_id = int(query.data.replace("admin_send_channel_", ""))
+        target_channels = [channel_id]
+        channel_desc = f"канал ID: {channel_id}"
+    elif query.data == "admin_cancel_send":
+        await query.message.edit_text(
+            "❌ <b>Отправка отменена</b>\n\n"
+            "Используйте /start для возврата в меню.",
+            parse_mode='HTML'
+        )
+        # Очистить контекст
+        context.user_data.pop('admin_selected_message', None)
+        context.user_data.pop('admin_total_posts', None)
+        return ConversationHandler.END
+    else:
+        await query.message.edit_text(
+            "❌ <b>Ошибка:</b> Неизвестная команда.",
+            parse_mode='HTML'
+        )
+        return ConversationHandler.END
+    
+    logger.info(f"Админ {user_id} отправляет пост в {channel_desc}")
+    
+    # Показать сообщение "Отправка..."
+    await query.message.edit_text(
         f"⏳ <b>Отправка поста...</b>\n\n"
-        f"📝 {message['title']}\n\n"
+        f"📝 {message['title']}\n"
+        f"📡 Каналов: {channel_desc}\n\n"
         f"Пожалуйста, подождите...",
         parse_mode='HTML'
     )
     
-    # Получить экземпляр бота из контекста
+    # Получить экземпляр бота
     bot_instance = context.bot_data.get('bot_instance')
     
     if not bot_instance:
-        await status_message.edit_text(
-            "❌ <b>Ошибка:</b> Не удалось получить доступ к боту.\n\n"
-            "Используйте /start для возврата в меню.",
+        await query.message.edit_text(
+            "❌ <b>Ошибка:</b> Не удалось получить доступ к боту.",
             parse_mode='HTML'
         )
         return ConversationHandler.END
     
     # Отправить пост
     try:
-        result = await bot_instance.send_specific_message(message)
+        result = await bot_instance.send_specific_message(message, target_channels)
         
         success_count = result['success_count']
         error_count = result['error_count']
@@ -467,10 +567,10 @@ async def admin_select_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Формирование отчета
         if error_count == 0:
             status_emoji = "✅"
-            status_text = "Пост успешно отправлен во все каналы!"
+            status_text = "Пост успешно отправлен!"
         elif success_count == 0:
             status_emoji = "❌"
-            status_text = "Не удалось отправить пост ни в один канал!"
+            status_text = "Не удалось отправить пост!"
         else:
             status_emoji = "⚠️"
             status_text = "Пост отправлен частично."
@@ -478,20 +578,21 @@ async def admin_select_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         report = (
             f"{status_emoji} <b>{status_text}</b>\n\n"
             f"📝 <b>Пост:</b> {message['title']}\n"
+            f"📡 <b>Цель:</b> {channel_desc}\n"
             f"📊 <b>Статистика:</b>\n"
             f"  • Успешно: {success_count}/{total_channels}\n"
             f"  • Ошибок: {error_count}/{total_channels}\n\n"
             f"Используйте /start для возврата в меню."
         )
         
-        await status_message.edit_text(report, parse_mode='HTML')
+        await query.message.edit_text(report, parse_mode='HTML')
         
         logger.info(f"Админ-отправка завершена: успешно {success_count}, ошибок {error_count}")
         
     except Exception as e:
         logger.error(f"Ошибка при админ-отправке поста: {e}", exc_info=True)
         
-        await status_message.edit_text(
+        await query.message.edit_text(
             f"❌ <b>Ошибка при отправке поста!</b>\n\n"
             f"Подробности: {str(e)}\n\n"
             f"Используйте /start для возврата в меню.",
@@ -499,6 +600,7 @@ async def admin_select_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     # Очистить контекст
+    context.user_data.pop('admin_selected_message', None)
     context.user_data.pop('admin_total_posts', None)
     
     return ConversationHandler.END
@@ -517,6 +619,7 @@ async def admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Очистить контекст
     context.user_data.pop('admin_total_posts', None)
+    context.user_data.pop('admin_selected_message', None)
     
     return ConversationHandler.END
 
@@ -526,10 +629,16 @@ admin_conversation_handler = ConversationHandler(
     entry_points=[CallbackQueryHandler(admin_send_post_button, pattern="^admin_send_post$")],
     states={
         ADMIN_PASSWORD_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_check_password)],
-        ADMIN_POST_SELECTION_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_select_post)]
+        ADMIN_POST_SELECTION_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_select_post)],
+        ADMIN_CHANNEL_SELECTION_STATE: [
+            CallbackQueryHandler(admin_send_to_channels, pattern="^admin_send_")
+        ]
     },
     fallbacks=[CommandHandler("cancel", admin_cancel)],
-    conversation_timeout=300  # 5 минут
+    conversation_timeout=300,  # 5 минут
+    per_message=False,
+    per_chat=True,
+    per_user=True
 )
 
 
