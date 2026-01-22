@@ -13,7 +13,10 @@ from config import BOT_TOKEN, CHANNEL_IDS, logger, MAX_PHOTOS_PER_POST
 from database import db
 from message_selector import selector
 from scheduler import bot_scheduler
-from handlers import start_command, help_command, status_command, schedule_command, button_callback, error_handler
+from handlers import (
+    start_command, help_command, status_command, schedule_command, 
+    button_callback, error_handler, admin_conversation_handler
+)
 from schedule_generator import generate_schedule_for_subscribers
 
 
@@ -313,6 +316,63 @@ class AutoPosterBot:
         logger.info(f"Рассылка завершена: успешно {success_count}, ошибок {error_count}")
         logger.info("=" * 50)
     
+    async def send_specific_message(self, message: Dict) -> Dict:
+        """
+        Отправить конкретное сообщение во все каналы (для админа).
+        
+        Args:
+            message: Словарь с данными сообщения
+            
+        Returns:
+            Словарь с результатами: {'success_count': int, 'error_count': int, 'channels': list}
+        """
+        logger.info("=" * 50)
+        logger.info(f"[АДМИН] Отправка сообщения {message['id']} ({message['title']})")
+        
+        message_id = message['id']
+        message_title = message['title']
+        
+        success_count = 0
+        error_count = 0
+        channels_result = []
+        
+        for channel_id in CHANNEL_IDS:
+            logger.info(f"[АДМИН] Отправка в канал {channel_id}...")
+            
+            success = await self.send_message_to_channel(channel_id, message)
+            
+            if success:
+                success_count += 1
+                channels_result.append({'channel_id': channel_id, 'success': True})
+                db.log_message_sent(
+                    message_id=message_id,
+                    message_title=f"[АДМИН] {message_title}",
+                    channel_id=channel_id,
+                    success=True
+                )
+            else:
+                error_count += 1
+                channels_result.append({'channel_id': channel_id, 'success': False})
+                db.log_message_sent(
+                    message_id=message_id,
+                    message_title=f"[АДМИН] {message_title}",
+                    channel_id=channel_id,
+                    success=False,
+                    error_message="Ошибка отправки"
+                )
+            
+            # Небольшая задержка между отправками
+            await asyncio.sleep(1)
+        
+        logger.info(f"[АДМИН] Отправка завершена: успешно {success_count}, ошибок {error_count}")
+        logger.info("=" * 50)
+        
+        return {
+            'success_count': success_count,
+            'error_count': error_count,
+            'channels': channels_result
+        }
+    
     async def test_send(self, message_id: Optional[int] = None):
         """
         Тестовая отправка сообщения (для проверки).
@@ -344,11 +404,17 @@ class AutoPosterBot:
         if self.application is None:
             self.application = Application.builder().token(BOT_TOKEN).build()
         
+        # Сохранить экземпляр бота в bot_data для доступа из handlers
+        self.application.bot_data['bot_instance'] = self
+        
         # Добавить обработчики команд
         self.application.add_handler(CommandHandler("start", start_command))
         self.application.add_handler(CommandHandler("help", help_command))
         self.application.add_handler(CommandHandler("status", status_command))
         self.application.add_handler(CommandHandler("schedule", schedule_command))
+        
+        # Добавить админ conversation handler (должен быть перед CallbackQueryHandler)
+        self.application.add_handler(admin_conversation_handler)
         
         # Добавить обработчик кнопок
         self.application.add_handler(CallbackQueryHandler(button_callback))

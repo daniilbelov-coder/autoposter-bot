@@ -4,10 +4,15 @@
 
 import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes
+from telegram.ext import ContextTypes, ConversationHandler, MessageHandler, CallbackQueryHandler, CommandHandler, filters
 from database import db
-from config import logger
+from config import logger, ADMIN_PASSWORD
 from schedule_generator import generate_schedule_for_subscribers
+from message_selector import selector
+
+# Состояния для админ-диалога
+ADMIN_PASSWORD_STATE = 1
+ADMIN_POST_SELECTION_STATE = 2
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -37,6 +42,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard.append([
         InlineKeyboardButton("📅 Получить календарь", callback_data="get_schedule")
     ])
+    
+    keyboard.append([
+        InlineKeyboardButton("📤 Отправить пост (Админ)", callback_data="admin_send_post")
+        ])
     
     keyboard.append([
         InlineKeyboardButton("ℹ️ Информация", callback_data="info")
@@ -310,6 +319,218 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await query.answer()
         await query.edit_message_text(info_text, parse_mode='HTML')
+
+
+async def admin_send_post_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик кнопки 'Отправить пост (Админ)'."""
+    query = update.callback_query
+    await query.answer()
+    
+    user = query.from_user
+    user_id = user.id
+    
+    logger.info(f"Запрос админ-панели от пользователя {user_id} (@{user.username})")
+    
+    # Проверить, установлен ли пароль
+    if not ADMIN_PASSWORD:
+        await query.message.reply_text(
+            "❌ Админ-функция недоступна: пароль не установлен в настройках бота.",
+            parse_mode='HTML'
+        )
+        return ConversationHandler.END
+    
+    # Запросить пароль
+    await query.message.reply_text(
+        "🔐 <b>Админ-панель</b>\n\n"
+        "Введите пароль администратора для доступа к функции ручной отправки постов:\n\n"
+        "Для отмены используйте /cancel",
+        parse_mode='HTML'
+    )
+    
+    return ADMIN_PASSWORD_STATE
+
+
+async def admin_check_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверка пароля администратора."""
+    user = update.effective_user
+    user_id = user.id
+    password = update.message.text.strip()
+    
+    # Проверить пароль
+    if password != ADMIN_PASSWORD:
+        logger.warning(f"Неверный пароль от пользователя {user_id} (@{user.username})")
+        
+        await update.message.reply_text(
+            "❌ <b>Неверный пароль!</b>\n\n"
+            "Доступ запрещен. Возвращаемся в главное меню.\n\n"
+            "Используйте /start для возврата в меню.",
+            parse_mode='HTML'
+        )
+        
+        return ConversationHandler.END
+    
+    # Пароль верный - показать список постов
+    logger.info(f"Успешная авторизация пользователя {user_id} (@{user.username})")
+    
+    messages = selector.messages
+    
+    if not messages:
+        await update.message.reply_text(
+            "❌ <b>Ошибка:</b> Список постов пуст!",
+            parse_mode='HTML'
+        )
+        return ConversationHandler.END
+    
+    # Формирование списка постов
+    post_list = "🔐 <b>Админ-панель: Выбор поста для отправки</b>\n\n"
+    post_list += "Введите номер поста, который хотите отправить:\n\n"
+    
+    for idx, message in enumerate(messages, 1):
+        title = message['title']
+        # Ограничить длину заголовка для удобства
+        if len(title) > 60:
+            title = title[:57] + "..."
+        post_list += f"{idx}. {title}\n"
+    
+    post_list += f"\n<b>Всего постов:</b> {len(messages)}\n\n"
+    post_list += "Для отмены используйте /cancel"
+    
+    # Сохранить количество постов в контексте
+    context.user_data['admin_total_posts'] = len(messages)
+    
+    await update.message.reply_text(post_list, parse_mode='HTML')
+    
+    return ADMIN_POST_SELECTION_STATE
+
+
+async def admin_select_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Выбор поста по номеру и отправка в каналы."""
+    user = update.effective_user
+    user_id = user.id
+    text = update.message.text.strip()
+    
+    # Парсить номер
+    try:
+        post_number = int(text)
+    except ValueError:
+        await update.message.reply_text(
+            "❌ <b>Ошибка:</b> Введите корректный номер поста.\n\n"
+            "Используйте /cancel для отмены.",
+            parse_mode='HTML'
+        )
+        return ADMIN_POST_SELECTION_STATE
+    
+    # Валидировать номер
+    total_posts = context.user_data.get('admin_total_posts', len(selector.messages))
+    
+    if post_number < 1 or post_number > total_posts:
+        await update.message.reply_text(
+            f"❌ <b>Ошибка:</b> Номер поста должен быть от 1 до {total_posts}.\n\n"
+            "Используйте /cancel для отмены.",
+            parse_mode='HTML'
+        )
+        return ADMIN_POST_SELECTION_STATE
+    
+    # Получить сообщение по индексу (индексы начинаются с 0)
+    messages = selector.messages
+    message = messages[post_number - 1]
+    
+    logger.info(f"Админ {user_id} выбрал пост #{post_number}: {message['title']}")
+    
+    # Отправить сообщение "Отправка..."
+    status_message = await update.message.reply_text(
+        f"⏳ <b>Отправка поста...</b>\n\n"
+        f"📝 {message['title']}\n\n"
+        f"Пожалуйста, подождите...",
+        parse_mode='HTML'
+    )
+    
+    # Получить экземпляр бота из контекста
+    bot_instance = context.bot_data.get('bot_instance')
+    
+    if not bot_instance:
+        await status_message.edit_text(
+            "❌ <b>Ошибка:</b> Не удалось получить доступ к боту.\n\n"
+            "Используйте /start для возврата в меню.",
+            parse_mode='HTML'
+        )
+        return ConversationHandler.END
+    
+    # Отправить пост
+    try:
+        result = await bot_instance.send_specific_message(message)
+        
+        success_count = result['success_count']
+        error_count = result['error_count']
+        total_channels = success_count + error_count
+        
+        # Формирование отчета
+        if error_count == 0:
+            status_emoji = "✅"
+            status_text = "Пост успешно отправлен во все каналы!"
+        elif success_count == 0:
+            status_emoji = "❌"
+            status_text = "Не удалось отправить пост ни в один канал!"
+        else:
+            status_emoji = "⚠️"
+            status_text = "Пост отправлен частично."
+        
+        report = (
+            f"{status_emoji} <b>{status_text}</b>\n\n"
+            f"📝 <b>Пост:</b> {message['title']}\n"
+            f"📊 <b>Статистика:</b>\n"
+            f"  • Успешно: {success_count}/{total_channels}\n"
+            f"  • Ошибок: {error_count}/{total_channels}\n\n"
+            f"Используйте /start для возврата в меню."
+        )
+        
+        await status_message.edit_text(report, parse_mode='HTML')
+        
+        logger.info(f"Админ-отправка завершена: успешно {success_count}, ошибок {error_count}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при админ-отправке поста: {e}", exc_info=True)
+        
+        await status_message.edit_text(
+            f"❌ <b>Ошибка при отправке поста!</b>\n\n"
+            f"Подробности: {str(e)}\n\n"
+            f"Используйте /start для возврата в меню.",
+            parse_mode='HTML'
+        )
+    
+    # Очистить контекст
+    context.user_data.pop('admin_total_posts', None)
+    
+    return ConversationHandler.END
+
+
+async def admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена админ-операции."""
+    user = update.effective_user
+    logger.info(f"Пользователь {user.id} отменил админ-операцию")
+    
+    await update.message.reply_text(
+        "❌ <b>Операция отменена</b>\n\n"
+        "Используйте /start для возврата в главное меню.",
+        parse_mode='HTML'
+    )
+    
+    # Очистить контекст
+    context.user_data.pop('admin_total_posts', None)
+    
+    return ConversationHandler.END
+
+
+# ConversationHandler для админ-панели
+admin_conversation_handler = ConversationHandler(
+    entry_points=[CallbackQueryHandler(admin_send_post_button, pattern="^admin_send_post$")],
+    states={
+        ADMIN_PASSWORD_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_check_password)],
+        ADMIN_POST_SELECTION_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_select_post)]
+    },
+    fallbacks=[CommandHandler("cancel", admin_cancel)],
+    conversation_timeout=300  # 5 минут
+)
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
