@@ -46,7 +46,13 @@ MESSAGES_FILE = 'messages.json'
 # Максимальное количество фотографий в одном media group
 MAX_PHOTOS_PER_POST = 10
 
-# Логирование (moved up for debug purposes)
+# Админ пароль для ручной отправки постов
+ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD')
+if not ADMIN_PASSWORD:
+    import logging
+    logging.warning("ADMIN_PASSWORD не установлен в .env файле! Админ-функции будут недоступны.")
+
+# Логирование
 import logging
 
 logging.basicConfig(
@@ -55,13 +61,3 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
-
-# Админ пароль для ручной отправки постов
-ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD')
-
-# #region agent log
-logger.info(f"[DEBUG-HypD] ADMIN_PASSWORD loaded: password_set={bool(ADMIN_PASSWORD)}, password_length={len(ADMIN_PASSWORD) if ADMIN_PASSWORD else 0}")
-# #endregion
-
-if not ADMIN_PASSWORD:
-    logging.warning("ADMIN_PASSWORD не установлен в .env файле! Админ-функции будут недоступны.")

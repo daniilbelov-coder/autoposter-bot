@@ -178,20 +178,12 @@ async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик нажатий на кнопки."""
-    # #region agent log
-    logger.info(f"[DEBUG-HypB] button_callback called: has_callback_query={hasattr(update,'callback_query')}")
-    # #endregion
-    
     query = update.callback_query
     await query.answer()
     
     user = query.from_user
     user_id = user.id
     data = query.data
-    
-    # #region agent log
-    logger.info(f"[DEBUG-HypB] button callback data: callback_data={data}, user_id={user_id}, is_admin_send_post={data=='admin_send_post'}")
-    # #endregion
     
     if data == "subscribe":
         # Подписать пользователя
@@ -333,27 +325,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin_send_post_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик кнопки 'Отправить пост (Админ)'."""
-    # #region agent log
-    logger.info(f"[DEBUG-HypA,C] admin_send_post_button called: update_type={type(update)}, has_callback_query={hasattr(update,'callback_query')}")
-    # #endregion
-    
     query = update.callback_query
     await query.answer()
     
     user = query.from_user
     user_id = user.id
     
-    # #region agent log
-    logger.info(f"[DEBUG-HypA] user info: user_id={user_id}, username={user.username if user.username else 'None'}")
-    # #endregion
-    
     logger.info(f"Запрос админ-панели от пользователя {user_id} (@{user.username})")
     
     # Проверить, установлен ли пароль
-    # #region agent log
-    logger.info(f"[DEBUG-HypD] checking ADMIN_PASSWORD: password_set={bool(ADMIN_PASSWORD)}, password_value={'SET' if ADMIN_PASSWORD else 'NONE'}")
-    # #endregion
-    
     if not ADMIN_PASSWORD:
         await query.message.reply_text(
             "❌ Админ-функция недоступна: пароль не установлен в настройках бота.",
@@ -374,17 +354,9 @@ async def admin_send_post_button(update: Update, context: ContextTypes.DEFAULT_T
 
 async def admin_check_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Проверка пароля администратора."""
-    # #region agent log
-    logger.info(f"[DEBUG-HypD,E] admin_check_password called: has_message={hasattr(update,'message')}, has_text={hasattr(update.message,'text') if hasattr(update,'message') else False}")
-    # #endregion
-    
     user = update.effective_user
     user_id = user.id
     password = update.message.text.strip()
-    
-    # #region agent log
-    logger.info(f"[DEBUG-HypD] password check: user_id={user_id}, password_length={len(password)}, admin_password_length={len(ADMIN_PASSWORD) if ADMIN_PASSWORD else 0}, passwords_match={password==ADMIN_PASSWORD}")
-    # #endregion
     
     # Проверить пароль
     if password != ADMIN_PASSWORD:
@@ -435,17 +407,9 @@ async def admin_check_password(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def admin_select_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Выбор поста по номеру - показать превью."""
-    # #region agent log
-    logger.info(f"[DEBUG-HypE] admin_select_post called: has_message={hasattr(update,'message')}, has_text={hasattr(update.message,'text') if hasattr(update,'message') else False}")
-    # #endregion
-    
     user = update.effective_user
     user_id = user.id
     text = update.message.text.strip()
-    
-    # #region agent log
-    logger.info(f"[DEBUG-HypE] post selection text: user_id={user_id}, text={text}")
-    # #endregion
     
     # Парсить номер
     try:
@@ -527,19 +491,11 @@ async def admin_select_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin_send_to_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отправка поста в выбранные каналы."""
-    # #region agent log
-    logger.info(f"[DEBUG-HypE] admin_send_to_channels called: has_callback_query={hasattr(update,'callback_query')}")
-    # #endregion
-    
     query = update.callback_query
     await query.answer()
     
     user = query.from_user
     user_id = user.id
-    
-    # #region agent log
-    logger.info(f"[DEBUG-HypE] callback data: callback_data={query.data}, user_id={user_id}")
-    # #endregion
     
     # Получить выбранное сообщение
     message = context.user_data.get('admin_selected_message')
@@ -591,15 +547,7 @@ async def admin_send_to_channels(update: Update, context: ContextTypes.DEFAULT_T
     )
     
     # Получить экземпляр бота
-    # #region agent log
-    logger.info(f"[DEBUG-HypE] getting bot_instance: has_bot_data={bool(context.bot_data)}, bot_data_keys={list(context.bot_data.keys()) if context.bot_data else []}")
-    # #endregion
-    
     bot_instance = context.bot_data.get('bot_instance')
-    
-    # #region agent log
-    logger.info(f"[DEBUG-HypE] bot_instance check: bot_instance_exists={bool(bot_instance)}, bot_instance_type={type(bot_instance) if bot_instance else 'None'}")
-    # #endregion
     
     if not bot_instance:
         await query.message.edit_text(
